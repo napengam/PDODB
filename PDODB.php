@@ -84,16 +84,3 @@ class PDODB {
         return $stmt;
     }
 }
-
-$mitglieder = [
-    'host' => 'localhost',
-    'dbname' => 'v092997',
-    'user' => 'root',
-    'password' => 'hgs123'
-];
-
-$x = PDODB::getInstance($mitglieder);
-$r = $x->query("select * from mitglieder where name like ?", ["%hö%"]);
-echo count($r);
-$r = $x->getLastRowCount();
-echo $r;
