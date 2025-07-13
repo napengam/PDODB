@@ -32,8 +32,8 @@ class PDODB {
      */
     public static function getInstance($cfg): self {
         foreach (['host', 'dbname', 'user', 'password'] as $key) {
-            if (empty($cfg[$key])) {
-                throw new InvalidArgumentException("Missing DB config key: $key");
+            if (empty($cfg[trim($key)])) {
+                throw new InvalidArgumentException("Missing DB config key: '$key'");
             }
         }
         if (!isset(self::$instances[$cfg['dbname']])) {
