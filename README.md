@@ -4,22 +4,22 @@
 ![PHP Version](https://img.shields.io/badge/PHP-8.0%2B-blue.svg)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-A lightweight, singleton PDO wrapper class for secure and efficient database operations in PHP.
+A lightweight, secure PDO database wrapper for MySQL with connection pooling, transaction support, and table locking capabilities.
 
 ## Features
 
-- Singleton pattern ensures single database connection per configuration
-- Secure prepared statements by default
-- Simple query execution with parameter binding
-- Error handling with exceptions
-- Connection pooling for multiple databases
-- Lightweight with minimal overhead
+- Singleton pattern for database instances
+- Prepared statements by default
+- Transaction management (begin, commit, rollback)
+- Table locking/unlocking
+- Error handling with automatic rollback
+- Configurable fetch mode (defaults to objects)
+- Connection pooling by database name
 
 ## Installation
 
-Simply include the class file in your project:
-
-### Basic Setup
+1. Ensure you have PHP 8.0+ with PDO MySQL extension enabled
+2. Include the PDODB class in your project:
 
 ```php
 require_once 'PDODB.php';
@@ -61,29 +61,25 @@ $id = $db->lastInsertId();
 ```
 ## Methods
 
-| Method | Description |
-|--------|-------------|
-| `getInstance(array $cfg)` | Gets singleton instance for given config |
-| `query(string\|PDOStatement $sql, array $params)` | Executes query and returns results |
-| `queryPrepare(string\|PDOStatement $sql)` | Prepares statement for later execution |
-| `lastInsertId()` | Returns last inserted ID |
-| `getLastRowCount()` | Returns number of rows affected by last query |
-| `getPDO()` | Returns raw PDO instance (for advanced use) |
+| Method                 | Description                               |
+| ---------------------- | ----------------------------------------- |
+| `getInstance($cfg)`    | Get or create a DB instance per config    |
+| `getPDO()`             | Get raw PDO connection                    |
+| `query($sql, $params)` | Run query and return all rows             |
+| `queryPrepare($sql)`   | Return a prepared PDOStatement            |
+| `lastInsertId()`       | Get last auto-increment ID                |
+| `getLastRowCount()`    | Get number of rows affected by last query |
+| `begin()`              | Start transaction                         |
+| `commit()`             | Commit transaction                        |
+| `rollback()`           | Roll back transaction                     |
+| `lockTables($sql)`     | Lock tables using SQL `LOCK TABLES`       |
+| `unlockTables()`       | Unlock previously locked tables           |
 
 ## Requirements
 
 - PHP 8.0 or higher
 - PDO extension with MySQL driver
 
-## Security
-
-- Uses prepared statements exclusively
-- Errors are logged but not displayed to users
-- Follows PHP best practices for database access
-
-## Download
-
-[Download PDODB.php](PDODB.php) (right-click and "Save link as")
 
 ## License
 

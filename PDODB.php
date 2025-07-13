@@ -4,6 +4,7 @@ class PDODB {
 
     private PDO $pdo;
     private int $lastRowCount;
+    private bool $isLocked;
     private string $realDBName = '';
     // store instances per dbAlias
     private static array $instances = [];
@@ -21,8 +22,7 @@ class PDODB {
             $this->pdo = new PDO($dsn, $cfg['user'], $cfg['password'], $opt);
             $this->pdo->exec("SET SESSION sql_mode = 'NO_ZERO_DATE,NO_ZERO_IN_DATE'");
         } catch (PDOException $e) {
-            error_log("Database connection failed: " . $e->getMessage());
-            throw new Exception("Database connection failed.");
+            $this->handleError('query', $e);
         }
         $this->realDBName = $cfg['dbname'];
     }
@@ -54,11 +54,10 @@ class PDODB {
         try {
             $stmt = $this->isSqlOrStatement($sql);
             $stmt->execute($params);
-            $this->lastRowCount = $stmt->rowCount(); 
+            $this->lastRowCount = $stmt->rowCount();
             return $stmt->fetchAll() ?: [];
         } catch (PDOException $e) {
-            error_log("Query execution failed: " . $e->getMessage());
-            throw new Exception("Query execution failed.");
+            $this->handleError('query', $e);
         }
     }
 
@@ -77,10 +76,72 @@ class PDODB {
             try {
                 $stmt = $this->pdo->prepare($sql);
             } catch (PDOException $e) {
-                error_log("Prepare for $sql failed: " . $e->getMessage());
-                throw new Exception("Query execution failed.");
+                $this->handleError('query', $e);
             }
         }
         return $stmt;
+    }
+
+    public function lockTables(string $lockSql): bool {
+        if ($this->isLocked) {
+            return true;
+        }
+
+        if (empty($lockSql)) {
+            throw new InvalidArgumentException("Lock SQL cannot be empty.");
+        }
+
+        $result = $this->pdo->query($lockSql);
+        if ($result !== false) {
+            $this->isLocked = true;
+        }
+        return $this->isLocked;
+    }
+
+    public function unlockTables(): void {
+        if ($this->isLocked === true) {
+            $this->pdo->query("UNLOCK TABLES");
+            $this->isLocked = false;
+        }
+    }
+
+    public function begin(): void {
+        $this->pdo->beginTransaction();
+    }
+
+    public function commit(): void {
+        if ($this->pdo->inTransaction()) {
+            $this->pdo->commit();
+        }
+    }
+
+    public function rollback(): void {
+        if ($this->pdo->inTransaction()) {
+            $this->pdo->rollBack();
+        }
+    }
+
+    private function handleError(string $context, Exception $e): void {
+        // Attempt rollback if in transaction
+        try {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+        } catch (PDOException $ex) {
+            error_log("Rollback failed during $context: " . $ex->getMessage());
+        }
+
+        // Attempt to unlock tables
+        try {
+            $this->pdo->exec("UNLOCK TABLES");
+        } catch (PDOException $ex) {
+            error_log("Unlock tables failed during $context: " . $ex->getMessage());
+        }
+
+        // Log original error
+        error_log("DB ERROR during $context: " . $e->getMessage());
+
+        // Throw sanitized error to caller
+        throw new Exception("A database error occurred. Please try again later.");
     }
 }
