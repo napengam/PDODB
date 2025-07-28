@@ -61,6 +61,31 @@ class PDODB {
         }
     }
 
+    public function getEmptyRecord(string $table): object {
+        $stmt = $this->pdo->prepare("SHOW COLUMNS FROM `$table`");
+        $stmt->execute();
+
+        $record = new stdClass();
+
+        while ($column = $stmt->fetchObject()) {
+            $field = $column->Field;
+
+            $type = strtolower($column->Type);
+
+            if (strpos($column->Extra, 'auto_increment') !== false) {
+                $record->$field = null;
+            } elseif (preg_match('/int|float|double|decimal/', $type)) {
+                $record->$field = 0;
+            } elseif (preg_match('/date|time/', $type)) {
+                $record->$field = null;
+            } else {
+                $record->$field = '';
+            }
+        }
+
+        return $record;
+    }
+
     public function lastInsertId(): string {
         return $this->pdo->lastInsertId();
     }

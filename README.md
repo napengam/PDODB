@@ -66,6 +66,7 @@ $id = $db->lastInsertId();
 | `getInstance($cfg)`    | Get or create a DB instance per config    |
 | `getPDO()`             | Get raw PDO connection                    |
 | `query($sql, $params)` | Run query and return all rows             |
+| `getEmptyRecord($tableName)` | Return a empty record as object; no insert done     |
 | `queryPrepare($sql)`   | Return a prepared PDOStatement            |
 | `lastInsertId()`       | Get last auto-increment ID                |
 | `getLastRowCount()`    | Get number of rows affected by last query |
