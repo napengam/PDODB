@@ -3,140 +3,212 @@
 class PDODB {
 
     private PDO $pdo;
-    private int $lastRowCount;
-    private bool $isLocked;
+    private string $dbAlias = '';
     private string $realDBName = '';
-    // store instances per dbAlias
+    private int $rowCount = 0;
     private static array $instances = [];
+    private ?PDOStatement $lastStatement = null;
+    private string $lastPublicId = '';
 
-    // private constructor: can't be called from outside directly
-    private function __construct($cfg) {
+    /* ---------------------------
+      Transaction & Lock Tracking
+      ---------------------------- */
+    private int $transactionLevel = 0;
+    private int $lastTransactionStart = 0;
+    private bool $tablesLocked = false;
+    private array $lockedTables = [];
 
-        $dsn = "mysql:host={$cfg['host']};dbname={$cfg['dbname']};charset=utf8";
+    /* ---------------------------
+      Statement cache
+      ---------------------------- */
+    private array $statementCache = [];
+    private int $statementCacheLimit = 100;
+
+    /* ---------------------------
+      Constructor / Factory
+      ---------------------------- */
+
+    private function __construct(string $name, array $config) {
+        $cfg = $config[$name];
+
+        $dsn = "mysql:host={$cfg['host']};dbname={$cfg['dbname']};charset=utf8mb4";
         $opt = [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_OBJ
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_OBJ,
+            PDO::ATTR_EMULATE_PREPARES => false,
         ];
 
-        try {
-            $this->pdo = new PDO($dsn, $cfg['user'], $cfg['password'], $opt);
-            $this->pdo->exec("SET SESSION sql_mode = 'NO_ZERO_DATE,NO_ZERO_IN_DATE'");
-        } catch (PDOException $e) {
-            $this->handleError('query', $e);
-        }
+        $this->pdo = new PDO($dsn, $cfg['user'], $cfg['password'], $opt);
+        $this->pdo->exec("SET SESSION sql_mode = 'NO_ZERO_DATE,NO_ZERO_IN_DATE'");
+
+        $this->dbAlias = $name;
         $this->realDBName = $cfg['dbname'];
     }
 
-    /**
-     * Static factory method to get the instance
-     */
-    public static function getInstance($cfg): self {
-        foreach (['host', 'dbname', 'user', 'password'] as $key) {
-            if (empty($cfg[trim($key)])) {
-                throw new InvalidArgumentException("Missing DB config key: '$key'");
-            }
+    public static function getInstance(string $name, array $cfg): self {
+        if (!isset(self::$instances[$name])) {
+            self::$instances[$name] = new self($name, $cfg);
         }
-        if (!isset(self::$instances[$cfg['dbname']])) {
-            self::$instances[$cfg['dbname']] = new self($cfg);
-        }
-        return self::$instances[$cfg['dbname']];
+        return self::$instances[$name];
     }
 
     public function getPDO(): PDO {
         return $this->pdo;
     }
 
-    public function queryPrepare(string|PDOStatement $sql): PDOStatement {
-        return $this->isSqlOrStatement($sql);
+    /* ---------------------------
+      Query helpers
+      ---------------------------- */
+
+    public function query(string|PDOStatement $sql, array $params = []): array {
+        $stmt = $this->prepareCached($sql);
+        $stmt->execute($params);
+
+        $this->rowCount = $stmt->rowCount();
+        $result = $stmt->fetchAll();
+        $stmt->closeCursor();
+
+        return $result ?: [];
     }
 
-    public function query(string|PDOStatement $sql, $params = []): array {
-        try {
-            $stmt = $this->isSqlOrStatement($sql);
-            $stmt->execute($params);
-            $this->lastRowCount = $stmt->rowCount();
-            return $stmt->fetchAll() ?: [];
-        } catch (PDOException $e) {
-            $this->handleError('query', $e);
+    public function queryFetchOne(string $sql, array $params = []): mixed {
+        if (!preg_match('/\blimit\b/i', $sql)) {
+            $sql .= ' LIMIT 1';
         }
+        $r = $this->query($sql, $params);
+        return $r[0] ?? null;
     }
 
-    public function getEmptyRecord(string $table): object {
-        $stmt = $this->pdo->prepare("SHOW COLUMNS FROM `$table`");
-        $stmt->execute();
+    public function queryMode(string $sql, string $mode, array $params = []): array|int {
+        $mode = strtolower($mode);
+        $stmt = $this->prepareCached($sql);
+        $stmt->execute($params);
 
-        $record = new stdClass();
-
-        while ($column = $stmt->fetchObject()) {
-            $field = $column->Field;
-
-            $type = strtolower($column->Type);
-
-            if (strpos($column->Extra, 'auto_increment') !== false) {
-                $record->$field = null;
-            } elseif (preg_match('/int|float|double|decimal/', $type)) {
-                $record->$field = 0;
-            } elseif (preg_match('/date|time/', $type)) {
-                $record->$field = null;
-            } else {
-                $record->$field = '';
-            }
+        if ($mode === 'exec') {
+            $this->rowCount = $stmt->rowCount();
+            return $this->rowCount;
         }
 
-        return $record;
+        $map = [
+            'object' => PDO::FETCH_OBJ,
+            'assoc' => PDO::FETCH_ASSOC,
+            'both' => PDO::FETCH_BOTH,
+            'num' => PDO::FETCH_NUM,
+            'column' => PDO::FETCH_COLUMN,
+        ];
+
+        if (!isset($map[$mode])) {
+            throw new InvalidArgumentException("Unknown fetch mode: $mode");
+        }
+
+        $result = $stmt->fetchAll($map[$mode]);
+        $stmt->closeCursor();
+
+        return $result;
     }
 
-    public function lastInsertId(): string {
-        return $this->pdo->lastInsertId();
+    /* ---------------------------
+      Statement caching
+      ---------------------------- */
+
+    private function normalizeSql(string $sql): string {
+        return trim(str_replace(["\r\n", "\r"], "\n", $sql));
     }
 
-    public function getLastRowCount(): int {
-        return $this->lastRowCount;
-    }
-
-    private function isSqlOrStatement(string|PDOStatement $sql): PDOStatement {
+    private function prepareCached(string|PDOStatement $sql): PDOStatement {
         if ($sql instanceof PDOStatement) {
-            $stmt = $sql;
-        } else {
-            try {
-                $stmt = $this->pdo->prepare($sql);
-            } catch (PDOException $e) {
-                $this->handleError('query', $e);
+            return $this->lastStatement = $sql;
+        }
+
+        $normalized = $this->normalizeSql($sql);
+        $hash = sha1($normalized);
+
+        if (!isset($this->statementCache[$hash])) {
+            $stmt = $this->pdo->prepare($normalized);
+
+            if (count($this->statementCache) >= $this->statementCacheLimit) {
+                array_shift($this->statementCache);
+            }
+
+            $this->statementCache[$hash] = $stmt;
+        }
+
+        return $this->lastStatement = $this->statementCache[$hash];
+    }
+
+    /* ---------------------------
+      insertPublicId
+      ---------------------------- */
+
+    public function insertPublicId(string $table, array|object|null $data = null): int {
+        $data = is_object($data) ? (array) $data : ($data ?? []);
+
+        if (empty($data['public_id'])) {
+            $data['public_id'] = bin2hex(random_bytes(16));
+        }
+
+        $cols = array_keys($data);
+        $ph = array_map(fn($c) => ':' . $c, $cols);
+
+        $sql = sprintf(
+                "INSERT INTO `%s` (%s) VALUES (%s)",
+                $table,
+                implode(',', array_map(fn($c) => "`$c`", $cols)),
+                implode(',', $ph)
+        );
+
+        $updates = [];
+        foreach ($cols as $c) {
+            if ($c !== 'public_id') {
+                $updates[] = "`$c` = VALUES(`$c`)";
             }
         }
-        return $stmt;
-    }
 
-    public function lockTables(string $lockSql): bool {
-        if ($this->isLocked) {
-            return true;
+        if ($updates) {
+            $sql .= ' ON DUPLICATE KEY UPDATE ' . implode(',', $updates);
         }
 
-        if (empty($lockSql)) {
-            throw new InvalidArgumentException("Lock SQL cannot be empty.");
-        }
-
-        $result = $this->pdo->query($lockSql);
-        if ($result !== false) {
-            $this->isLocked = true;
-        }
-        return $this->isLocked;
-    }
-
-    public function unlockTables(): void {
-        if ($this->isLocked === true) {
-            $this->pdo->query("UNLOCK TABLES");
-            $this->isLocked = false;
+        $attempts = 0;
+        while (true) {
+            try {
+                $this->query($sql, $data);
+                $this->lastPublicId = $data['public_id'];
+                return (int) $this->pdo->lastInsertId();
+            } catch (PDOException $e) {
+                if ($e->getCode() === '23000' && ++$attempts < 5) {
+                    $data['public_id'] = bin2hex(random_bytes(16));
+                    continue;
+                }
+                throw $e;
+            }
         }
     }
+
+    public function lastPublicId(): string {
+        return $this->lastPublicId;
+    }
+
+    /* ---------------------------
+      Transactions (nested-safe)
+      ---------------------------- */
 
     public function begin(): void {
-        $this->pdo->beginTransaction();
+        if ($this->transactionLevel === 0) {
+            $this->pdo->beginTransaction();
+            $this->lastTransactionStart = time();
+        }
+        $this->transactionLevel++;
     }
 
     public function commit(): void {
-        if ($this->pdo->inTransaction()) {
+        if ($this->transactionLevel === 0) {
+            return;
+        }
+        $this->transactionLevel--;
+
+        if ($this->transactionLevel === 0 && $this->pdo->inTransaction()) {
             $this->pdo->commit();
+            $this->lastTransactionStart = 0;
         }
     }
 
@@ -144,29 +216,63 @@ class PDODB {
         if ($this->pdo->inTransaction()) {
             $this->pdo->rollBack();
         }
+        $this->transactionLevel = 0;
+        $this->lastTransactionStart = 0;
     }
 
-    private function handleError(string $context, Exception $e): void {
-        // Attempt rollback if in transaction
-        try {
-            if ($this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
+    public function isInTransaction(): bool {
+        return $this->transactionLevel > 0;
+    }
+
+    /* ---------------------------
+      Table locking
+      ---------------------------- */
+
+    public function lockTables(string $sql): void {
+        $this->pdo->exec($sql);
+        $this->tablesLocked = true;
+
+        if (preg_match_all('/([a-z0-9_]+)\s+(read|write)/i', $sql, $m)) {
+            $this->lockedTables = array_map('strtolower', $m[1]);
+        }
+    }
+
+    public function unlockTables(): void {
+        if (!$this->tablesLocked) {
+            return;
+        }
+
+        if ($this->pdo->inTransaction()) {
+            $this->pdo->commit(); // implicit commit safety
+        }
+
+        $this->pdo->exec('UNLOCK TABLES');
+
+        $this->tablesLocked = false;
+        $this->lockedTables = [];
+        $this->transactionLevel = 0;
+        $this->lastTransactionStart = 0;
+    }
+
+    public function hasLockedTables(): bool {
+        return $this->tablesLocked;
+    }
+
+    /* ---------------------------
+      Global emergency cleanup
+      ---------------------------- */
+
+    public static function rollbackAll(): void {
+        foreach (self::$instances as $db) {
+            try {
+                if ($db->tablesLocked) {
+                    $db->unlockTables();
+                } elseif ($db->isInTransaction()) {
+                    $db->rollback();
+                }
+            } catch (Throwable $e) {
+                error_log('PDODB cleanup failed: ' . $e->getMessage());
             }
-        } catch (PDOException $ex) {
-            error_log("Rollback failed during $context: " . $ex->getMessage());
         }
-
-        // Attempt to unlock tables
-        try {
-            $this->pdo->exec("UNLOCK TABLES");
-        } catch (PDOException $ex) {
-            error_log("Unlock tables failed during $context: " . $ex->getMessage());
-        }
-
-        // Log original error
-        error_log("DB ERROR during $context: " . $e->getMessage());
-
-        // Throw sanitized error to caller
-        throw new Exception("A database error occurred. Please try again later.");
     }
 }
