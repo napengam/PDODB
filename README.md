@@ -1,5 +1,9 @@
 # PDODB
 
+
+![PHP Version](https://img.shields.io/badge/PHP-8.0%2B-blue.svg)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+
 PDODB is a **lightweight, SQL-first database abstraction layer** built
 on top of PHP PDO. It is intentionally **not an ORM**. Instead, it
 provides a thin, safe, and performant layer around PDO with predictable
