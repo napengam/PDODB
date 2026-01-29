@@ -106,7 +106,39 @@ class PDODB {
 
         return $result;
     }
-
+      function getEmptyRecord(string $table): object {
+            if (!preg_match('/^[a-zA-Z0-9_]+$/', $table)) {
+                throw new InvalidArgumentException("Invalid table name.");
+            }
+    
+            $stmt = $this->pdo->prepare("SHOW COLUMNS FROM `$table`");
+            $stmt->execute();
+    
+            $record = new stdClass();
+    
+            while ($column = $stmt->fetchObject()) {
+                $field = $column->Field;
+                $type = strtolower($column->Type);
+    
+                if (strpos($column->Extra, 'auto_increment') !== false) {
+                    $record->$field = null;
+                } elseif (preg_match('/\b(int|float|double|decimal)\b/', $type)) {
+                    $record->$field = 0;
+                } elseif (preg_match('/\b(date|time|timestamp)\b/', $type)) {
+                    $record->$field = null;
+                } elseif (preg_match('/^enum\((.+)\)$/', $type, $matches)) {
+                    // Extract first enum option
+                    $enumValues = str_getcsv($matches[1], ',', "'");
+                    $record->$field = $enumValues[0] ?? '';
+                } elseif (strpos($type, 'json') !== false) {
+                    $record->$field = '{}';
+                } else {
+                    $record->$field = '';
+                }
+            }
+    
+            return $record;
+        }
     /* ---------------------------
       Statement caching
       ---------------------------- */
